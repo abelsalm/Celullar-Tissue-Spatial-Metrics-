@@ -23,7 +23,7 @@ the tissue plane.
 Graph Laplacian tools for building spatial cell graphs, estimating connectivity,
 computing spectral gaps, and measuring Von Neumann entropy from graph spectra.
 
-![Von Neumann entropy cruves for different spatial tissue coordinates](__figures/disk_entropy_curves.png)
+![Von Neumann entropy cruves for different spatial tissue coordinates](__figures/disks_entropy_curves.png)
 
 ### `cahn-hilliard-energy`
 
