@@ -1006,7 +1006,7 @@ def plot_hks_video(
             valinit=float(times[0]),
             valstep=times,
             color="#ffb000",
-        )
+        )  
         eig_slider = Slider(
             eig_ax,
             "eigenpairs",

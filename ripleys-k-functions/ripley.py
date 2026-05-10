@@ -103,7 +103,7 @@ def ripley_pair_correlation_function(df, cell_type, radius, bandwidth=10e-4):
     return pair_correlation
 
 
-def plot_ripley_curves(df, cell_type, r_min, r_max, r_steps, scale=1.0, logspace=False):
+def plot_ripley_curves(df, cell_type, r_min, r_max, r_steps, scale=1.0, logspace=False, bandwidth=None):
     """
     Plot Ripley's L and pair correlation curves for a cell type in separate subplots.
 
@@ -121,6 +121,9 @@ def plot_ripley_curves(df, cell_type, r_min, r_max, r_steps, scale=1.0, logspace
         Plot scale/size multiplier.
     logspace : bool
         Whether to use log-spaced radii instead of linear.
+    bandwidth : float or None
+        Smoothing bandwidth for the pair correlation kernel. If None, the
+        median spacing between consecutive radii is used.
     """
     if r_steps < 2:
         raise ValueError("r_steps must be at least 2.")
@@ -135,8 +138,11 @@ def plot_ripley_curves(df, cell_type, r_min, r_max, r_steps, scale=1.0, logspace
     else:
         radii = np.linspace(r_min, r_max, int(r_steps), dtype=float)
 
+    if bandwidth is None:
+        bandwidth = float(np.median(np.diff(radii)))
+
     l_values = ripley_L_function(df, cell_type, radii)
-    pair_correlation = ripley_pair_correlation_function(df, cell_type, radii)
+    pair_correlation = ripley_pair_correlation_function(df, cell_type, radii, bandwidth=bandwidth)
 
     fig, axs = plt.subplots(2, 1, figsize=(8 * scale, 10 * scale), sharex=True)
 
@@ -160,7 +166,7 @@ def plot_ripley_curves(df, cell_type, r_min, r_max, r_steps, scale=1.0, logspace
     return fig, axs
 
 
-def plot_ripley_curves_multiple(dfs_and_names, cell_type, r_min, r_max, r_steps, scale=1.0, logspace=False):
+def plot_ripley_curves_multiple(dfs_and_names, cell_type, r_min, r_max, r_steps, scale=1.0, logspace=False, bandwidth=None):
     """
     Plot Ripley's L and pair correlation curves for multiple dataframes.
 
@@ -178,6 +184,11 @@ def plot_ripley_curves_multiple(dfs_and_names, cell_type, r_min, r_max, r_steps,
         Plot scale/size multiplier.
     logspace : bool
         Whether to use log-spaced radii instead of linear.
+    bandwidth : float or None
+        Smoothing bandwidth for the pair correlation kernel. If None, the
+        median spacing between consecutive radii is used (this rescales
+        with the radii grid so the same call works for both small and
+        large coordinate ranges).
     """
     if r_steps < 2:
         raise ValueError("r_steps must be at least 2.")
@@ -193,6 +204,9 @@ def plot_ripley_curves_multiple(dfs_and_names, cell_type, r_min, r_max, r_steps,
     else:
         radii = np.linspace(r_min, r_max, int(r_steps), dtype=float)
 
+    if bandwidth is None:
+        bandwidth = float(np.median(np.diff(radii)))
+
     dfs, names = dfs_and_names
     if len(dfs) != len(names):
         raise ValueError("dataframes and names must have the same length.")
@@ -203,7 +217,7 @@ def plot_ripley_curves_multiple(dfs_and_names, cell_type, r_min, r_max, r_steps,
 
     for df, name in zip(dfs, names):
         l_values = ripley_L_function(df, cell_type, radii)
-        pair_correlation = ripley_pair_correlation_function(df, cell_type, radii)
+        pair_correlation = ripley_pair_correlation_function(df, cell_type, radii, bandwidth=bandwidth)
 
         axs[0].plot(radii, l_values, label=name)
         axs[1].plot(radii, pair_correlation, label=name)
@@ -227,3 +241,132 @@ def plot_ripley_curves_multiple(dfs_and_names, cell_type, r_min, r_max, r_steps,
 
     return fig, axs
 
+import pandas as pd
+from typing import Tuple
+
+def align_prediction_rigid_to_ground_truth_by_id(
+    df_true: pd.DataFrame,
+    df_pred: pd.DataFrame,
+    *,
+    cell_class_value: str,
+    id_col: int | str = 0,
+    coord_cols: Tuple[str, str] = ("coord_X", "coord_Y"),
+    cell_class_col: str = "cell_class",
+    allow_reflection: bool = False,
+) -> pd.DataFrame:
+    """
+    Compute the optimal 2D rigid transform (rotation + translation) that aligns predicted
+    coordinates to ground-truth coordinates for one cell type, using shared unique IDs.
+
+    The alignment minimizes the sum of squared distances between matched cells:
+        min_{R,t} || (P R + t) - T ||_F^2
+    where R is 2x2 orthonormal (det=+1 unless allow_reflection=True).
+
+    Parameters
+    ----------
+    df_true, df_pred:
+        DataFrames containing coordinates and cell type annotations.
+    cell_class_value:
+        Which `cell_class` to filter on before matching.
+    id_col:
+        Column holding the unique cell ID used to match rows between df_true and df_pred.
+        If the CSV was read without an explicit name for the first column, it is commonly `0`.
+        You can also pass a string column name.
+    coord_cols:
+        (x_col, y_col) column names for coordinates.
+    cell_class_col:
+        Column name holding the cell type (default 'cell_class').
+    allow_reflection:
+        If False (default), enforce a proper rotation (det(R)=+1).
+        If True, allow reflection (det(R) may be -1).
+
+    Returns
+    -------
+    pd.DataFrame
+        Rows for the selected cell type and matched IDs, containing ground-truth columns
+        plus *transformed* prediction coordinates as 'coord_X_pred_aligned', 'coord_Y_pred_aligned'.
+        Also includes the raw prediction coordinates in 'coord_X_pred', 'coord_Y_pred'.
+    """
+
+    coord_X, coord_Y = coord_cols
+    for dname, d in [("df_true", df_true), ("df_pred", df_pred)]:
+        missing = {cell_class_col, coord_X, coord_Y} - set(d.columns)
+        if isinstance(id_col, str):
+            missing |= ({id_col} - set(d.columns))
+        else:
+            # int means positional column index
+            if not (0 <= int(id_col) < d.shape[1]):
+                raise KeyError(f"{dname}: id_col={id_col} is out of bounds for columns.")
+        if missing:
+            raise KeyError(f"{dname} missing required columns: {sorted(missing)}")
+
+    true_sub = df_true[df_true[cell_class_col] == cell_class_value].copy()
+    pred_sub = df_pred[df_pred[cell_class_col] == cell_class_value].copy()
+    if true_sub.empty or pred_sub.empty:
+        raise ValueError(
+            f"No rows for cell_class == {cell_class_value!r} in "
+            f"{'df_true' if true_sub.empty else ''}"
+            f"{' and ' if true_sub.empty and pred_sub.empty else ''}"
+            f"{'df_pred' if pred_sub.empty else ''}"
+        )
+
+    # Attach IDs (positional-safe)
+    if isinstance(id_col, str):
+        true_sub["_cell_id"] = true_sub[id_col]
+        pred_sub["_cell_id"] = pred_sub[id_col]
+    else:
+        true_sub["_cell_id"] = true_sub.iloc[:, int(id_col)]
+        pred_sub["_cell_id"] = pred_sub.iloc[:, int(id_col)]
+
+    # Inner-join on shared IDs
+    merged = true_sub.merge(
+        pred_sub[["_cell_id", coord_X, coord_Y]],
+        on="_cell_id",
+        how="inner",
+        suffixes=("_true", "_pred"),
+    )
+    if merged.shape[0] < 3:
+        raise ValueError(f"Need at least 3 matched cells to fit rigid transform; got {merged.shape[0]}.")
+
+    T = merged[[f"{coord_X}_true", f"{coord_Y}_true"]].to_numpy(dtype=float)  # target (true)
+    P = merged[[f"{coord_X}_pred", f"{coord_Y}_pred"]].to_numpy(dtype=float)  # source (pred)
+
+    finite = np.isfinite(T).all(axis=1) & np.isfinite(P).all(axis=1)
+    T = T[finite]
+    P = P[finite]
+    merged = merged.loc[finite].copy()
+    if T.shape[0] < 3:
+        raise ValueError("Not enough finite matched points to fit rigid transform.")
+
+    # Kabsch algorithm (2D)
+    t_mean = T.mean(axis=0)
+    p_mean = P.mean(axis=0)
+    Tc = T - t_mean
+    Pc = P - p_mean
+
+    H = Pc.T @ Tc
+    U, S, Vt = np.linalg.svd(H)
+    R = U @ Vt
+
+    if not allow_reflection and np.linalg.det(R) < 0:
+        # Fix reflection by flipping last singular vector
+        U[:, -1] *= -1
+        R = U @ Vt
+
+    t = t_mean - p_mean @ R
+
+    P_aligned = P @ R + t
+
+    out = merged.copy()
+    out[f"{coord_X}_pred_aligned"] = P_aligned[:, 0]
+    out[f"{coord_Y}_pred_aligned"] = P_aligned[:, 1]
+
+    # Keep the original cell id column name for convenience if possible
+    out.rename(columns={"_cell_id": "cell_id"}, inplace=True)
+    out["cell_type"] = cell_class_value
+
+    # Convenience columns: make aligned prediction available under coord_X/coord_Y
+    # so downstream plotting utilities that expect these names work directly.
+    out[coord_X] = out[f"{coord_X}_pred_aligned"]
+    out[coord_Y] = out[f"{coord_Y}_pred_aligned"]
+    return out
